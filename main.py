@@ -129,13 +129,13 @@ class CoveredCallBacktester:
                 prot_expires = date + timedelta(days=int(prot_expiration_days))
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Buy Protective Call', 'lots': lot_qty,
-                    'option_price': call_price, 'premium_received': 0, 'premium_paid': call_premium, 'total_premiums': total_premiums - call_premium,
+                    'option_price': call_price, 'Strike Price': K_call, 'premium_received': 0, 'premium_paid': call_premium, 'total_premiums': total_premiums - call_premium,
                     'P/L': -call_premium, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - call_premium
                 })
                 total_premiums -= call_premium
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Buy Protective Put', 'lots': lot_qty,
-                    'option_price': put_price, 'premium_received': 0, 'premium_paid': put_premium, 'total_premiums': total_premiums - put_premium,
+                    'option_price': put_price, 'Strike Price': K_put, 'premium_received': 0, 'premium_paid': put_premium, 'total_premiums': total_premiums - put_premium,
                     'P/L': -put_premium, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - put_premium
                 })
                 total_premiums -= put_premium
@@ -152,7 +152,7 @@ class CoveredCallBacktester:
                 total_premiums += callwrite_premium
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Call Writing', 'lots': lot_qty,
-                    'option_price': c_price, 'premium_received': callwrite_premium, 'premium_paid': 0, 'total_premiums': total_premiums,
+                    'option_price': c_price, 'Strike Price': K0, 'premium_received': callwrite_premium, 'premium_paid': 0, 'total_premiums': total_premiums,
                     'P/L': callwrite_premium, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
                 })
                 # Assignment check
@@ -161,7 +161,7 @@ class CoveredCallBacktester:
                     cash += proceeds
                     action_ledger.append({
                         'date': date, 'price': K0, 'transaction': 'Assignment', 'lots': lot_qty,
-                        'option_price': K0, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
+                        'option_price': K0, 'Strike Price': K0, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
                         'P/L': proceeds, 'cash': cash, 'shares': 0, 'total_value': cash + total_premiums
                     })
                     shares = 0
@@ -216,7 +216,7 @@ def main(verbose=False):
             merged['open'] = np.nan
         # Only include columns that exist
         base_cols = ['date', 'open', 'high', 'low', 'close']
-        extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'premium_received', 'premium_paid', 'total_premiums', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
+        extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
         other_cols = [c for c in merged.columns if c not in base_cols + extra_cols]
         cols = base_cols + extra_cols + other_cols
         merged = merged[cols]
