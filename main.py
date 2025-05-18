@@ -78,6 +78,7 @@ class CoveredCallBacktester:
         prot_positions = {'call': None, 'put': None}
         ledger = []
         action_ledger = []  # Detailed action log
+        cost_basis_per_share = None
 
         for i, (date, row) in enumerate(self.data.iterrows(), start=1):
             open_price = row['open']
@@ -92,7 +93,7 @@ class CoveredCallBacktester:
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Protective Options Expire', 'lots': lot_qty,
                     'option_price': None, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
-                    'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
+                    'Inflow/Outflow': 0, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
                 })
 
             # Buy underlying if not held
@@ -103,10 +104,11 @@ class CoveredCallBacktester:
                     cost = buy_shares * open_price
                     cash -= cost
                     shares = buy_shares
+                    cost_basis_per_share = open_price  # Track cost basis for assignment P/L
                     action_ledger.append({
                         'date': date, 'price': open_price, 'transaction': 'Purchase Underlying', 'lots': lot_qty,
-                        'option_price': None, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
-                        'P/L': -cost, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
+                        'option_price': None, 'Strike Price': None, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
+                        'Inflow/Outflow': -cost, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
                     })
 
             # Set up protective options if none and shares exist
@@ -131,13 +133,13 @@ class CoveredCallBacktester:
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Buy Protective Call', 'lots': lot_qty,
                     'option_price': call_price, 'Strike Price': K_call, 'premium_received': 0, 'premium_paid': call_premium, 'total_premiums': total_premiums - call_premium,
-                    'P/L': -call_premium, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - call_premium
+                    'Inflow/Outflow': -call_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - call_premium
                 })
                 total_premiums -= call_premium
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Buy Protective Put', 'lots': lot_qty,
                     'option_price': put_price, 'Strike Price': K_put, 'premium_received': 0, 'premium_paid': put_premium, 'total_premiums': total_premiums - put_premium,
-                    'P/L': -put_premium, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - put_premium
+                    'Inflow/Outflow': -put_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - put_premium
                 })
                 total_premiums -= put_premium
 
@@ -154,18 +156,20 @@ class CoveredCallBacktester:
                 action_ledger.append({
                     'date': date, 'price': price, 'transaction': 'Call Writing', 'lots': lot_qty,
                     'option_price': c_price, 'Strike Price': K0, 'premium_received': callwrite_premium, 'premium_paid': 0, 'total_premiums': total_premiums,
-                    'P/L': callwrite_premium, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
+                    'Inflow/Outflow': callwrite_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
                 })
                 # Assignment check
                 if high_price > K0:  # Assignment only if high exceeds strike
                     proceeds = shares * K0  # Assignment at strike price
                     cash += proceeds
+                    pl_assignment = proceeds - (shares * cost_basis_per_share if cost_basis_per_share is not None else 0)
                     action_ledger.append({
                         'date': date, 'price': K0, 'transaction': 'Assignment', 'lots': lot_qty,
                         'option_price': K0, 'Strike Price': K0, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
-                        'P/L': proceeds, 'cash': cash, 'shares': 0, 'total_value': cash + total_premiums
+                        'Inflow/Outflow': proceeds, 'P/L': pl_assignment, 'cash': cash, 'shares': 0, 'total_value': cash + total_premiums
                     })
                     shares = 0
+                    cost_basis_per_share = None
 
             total_value = cash + shares * price + total_premiums
             ledger.append({'date': date, 'cash': cash, 'shares': shares,
@@ -217,7 +221,7 @@ def main(verbose=False):
         if 'open' not in merged.columns:
             merged['open'] = np.nan
         base_cols = ['date', 'open', 'high', 'low', 'close']
-        extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
+        extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'Inflow/Outflow', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
         other_cols = [c for c in merged.columns if c not in base_cols + extra_cols]
         cols = base_cols + extra_cols + other_cols
         merged = merged[cols]
