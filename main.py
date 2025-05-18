@@ -35,7 +35,7 @@ class CoveredCallBacktester:
         self, start_date, end_date,
         capital=100000, dividend_yield=0.018,
         risk_free_rate=0.03, volatility=0.15,
-        verbose=False
+        verbose=False, stock='SPY'
     ):
         self.start_date = start_date
         self.end_date = end_date
@@ -44,12 +44,13 @@ class CoveredCallBacktester:
         self.risk_free_rate = risk_free_rate
         self.volatility = volatility
         self.verbose = verbose
+        self.stock = stock
         self.data = self._fetch_data()
 
     def _fetch_data(self):
-        logging.info(f"Fetching SPY OHLC data from {self.start_date} to {self.end_date}")
+        logging.info(f"Fetching {self.stock} OHLC data from {self.start_date} to {self.end_date}")
         df = yf.download(
-            'SPY', start=self.start_date, end=self.end_date,
+            self.stock, start=self.start_date, end=self.end_date,
             progress=False, auto_adjust=False
         )
         if not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close']):
@@ -174,10 +175,14 @@ class CoveredCallBacktester:
 
 def main(verbose=False):
     setup_logging(logging.INFO if verbose else logging.WARNING)
-    backtester = CoveredCallBacktester('2020-05-01', '2025-05-01', verbose=verbose)
-    # Use larger steps to reduce the number of simulations
+    stock = 'SPY'  # You can change this to any stock symbol
     deltas = np.arange(0.1, 1.01, 0.2)  # Step size 0.2 instead of 0.1
     prot_days = np.arange(30, 181, 60)   # Step size 60 instead of 30
+    print(f"\nStarting Covered Call Simulation for stock: {stock}")
+    print(f"Delta range: {deltas}")
+    print(f"Protective expiration days: {prot_days}")
+    print(f"Date range: 2020-05-01 to 2025-05-01\n")
+    backtester = CoveredCallBacktester('2020-05-01', '2025-05-01', verbose=verbose, stock=stock)
     param_grid = list(product(deltas, deltas, prot_days, deltas))
     results = []
     action_ledgers = []
@@ -197,32 +202,28 @@ def main(verbose=False):
             logging.info(f"{idx}/{len(param_grid)} completed")
     df_results = pd.DataFrame(results)
     top5 = df_results.sort_values(['final_value', 'volatility'], ascending=[False, True]).head(5)
+    print(f"\nTop 5 Results for stock: {stock}")
     print(top5[[col for col in top5.columns if col != 'action_ledger']])
     # Export top 5 action ledgers to XLSX
     for i, row in enumerate(top5.itertuples(), 1):
         df_action = row.action_ledger.copy()
         df_action = df_action.sort_values('date')
-        # Create a full date range for the simulation
         full_dates = pd.date_range(backtester.start_date, backtester.end_date, freq='B')
-        # Fetch SPY prices for the full date range and ensure columns are ['date', 'price']
         spy_prices = backtester.data.reindex(full_dates).copy().reset_index()
         spy_prices.columns = ['date', 'open', 'high', 'low', 'close', 'adj_close']
-        # Merge action ledger with full date range and SPY prices
         merged = pd.DataFrame({'date': full_dates})
         merged = merged.merge(spy_prices[['date', 'open', 'high', 'low', 'close']], on='date', how='left')
         merged = merged.merge(df_action, on='date', how='left')
-        # Ensure 'open' column exists
         if 'open' not in merged.columns:
             merged['open'] = np.nan
-        # Only include columns that exist
         base_cols = ['date', 'open', 'high', 'low', 'close']
         extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
         other_cols = [c for c in merged.columns if c not in base_cols + extra_cols]
         cols = base_cols + extra_cols + other_cols
         merged = merged[cols]
-        fname = f"simulation_{i}_final_{row.final_value:.2f}.xlsx"
+        fname = f"{stock}_simulation_{i}_final_{row.final_value:.2f}.xlsx"
         merged.to_excel(fname, index=False)
-        print(f"Exported {fname}")
+        print(f"Exported {fname} for stock: {stock}")
 
 # Minimal test case
 def test_run():
