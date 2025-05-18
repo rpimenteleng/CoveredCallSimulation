@@ -5,6 +5,7 @@ import logging
 from itertools import product
 from tqdm import tqdm
 from datetime import timedelta
+import math
 
 # Configure logging for verbosity
 def setup_logging(level=logging.INFO):
@@ -79,18 +80,43 @@ class CoveredCallBacktester:
         ledger = []
         action_ledger = []  # Detailed action log
         cost_basis_per_share = None
+        lookback = 30  # Number of days for quantile calculation
+        event_second = 0  # Used to increment event index for same-day events
+        def add_action_entry(entry):
+            nonlocal event_second
+            entry['event_index'] = event_second
+            event_second += 1
+            action_ledger.append(entry)
 
         for i, (date, row) in enumerate(self.data.iterrows(), start=1):
             open_price = row['open']
             high_price = row['high']
+            low_price = row['low']
             close_price = row['close']
             price = close_price  # For portfolio value, use close
             lot_qty = shares // 100 if shares > 0 else int(cash // (100 * open_price))
+            # Helper for quantile-based strike
+            def round_up_50(x):
+                return math.ceil(x * 2) / 2
+            # Get lookback window
+            if i > lookback:
+                ohlc_window = self.data.iloc[i - lookback:i]
+                open_to_high = ohlc_window['high'] - ohlc_window['open']
+                open_to_low = ohlc_window['open'] - ohlc_window['low']
+                # For calls: strike = open + quantile(Open-to-High, delta)
+                call_strike_quantile = lambda delta: round_up_50(open_price + np.quantile(open_to_high, delta))
+                # For puts: strike = open - quantile(Open-to-Low, delta)
+                put_strike_quantile = lambda delta: round_up_50(open_price - np.quantile(open_to_low, delta))
+            else:
+                # Not enough data, fallback to previous logic
+                call_strike_quantile = lambda delta: round_up_50(open_price)
+                put_strike_quantile = lambda delta: round_up_50(open_price)
+
             # Roll protective positions at expiration
             if prot_expires and date >= prot_expires:
                 prot_expires = None
                 prot_positions = {'call': None, 'put': None}
-                action_ledger.append({
+                add_action_entry({
                     'date': date, 'price': price, 'transaction': 'Protective Options Expire', 'lots': lot_qty,
                     'option_price': None, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
                     'Inflow/Outflow': 0, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
@@ -105,7 +131,7 @@ class CoveredCallBacktester:
                     cash -= cost
                     shares = buy_shares
                     cost_basis_per_share = open_price  # Track cost basis for assignment P/L
-                    action_ledger.append({
+                    add_action_entry({
                         'date': date, 'price': open_price, 'transaction': 'Purchase Underlying', 'lots': lot_qty,
                         'option_price': None, 'Strike Price': None, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
                         'Inflow/Outflow': -cost, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
@@ -114,8 +140,8 @@ class CoveredCallBacktester:
             # Set up protective options if none and shares exist
             if shares > 0 and prot_positions['call'] is None:
                 T = prot_expiration_days / 252
-                K_call = price * np.exp(self.volatility * np.sqrt(T) * np.sign(delta_prot_call - 0.5))
-                K_put = price * np.exp(-self.volatility * np.sqrt(T) * np.sign(delta_prot_put - 0.5))
+                K_call = call_strike_quantile(delta_prot_call)
+                K_put = put_strike_quantile(delta_prot_put)
                 call_price = price_option_crank_michelson(price, K_call, T, self.risk_free_rate,
                                                        self.dividend_yield, self.volatility, 'call')
                 put_price = price_option_crank_michelson(price, K_put, T, self.risk_free_rate,
@@ -130,13 +156,13 @@ class CoveredCallBacktester:
                     'put': {'strike': K_put, 'price': put_price}
                 }
                 prot_expires = date + timedelta(days=int(prot_expiration_days))
-                action_ledger.append({
+                add_action_entry({
                     'date': date, 'price': price, 'transaction': 'Buy Protective Call', 'lots': lot_qty,
                     'option_price': call_price, 'Strike Price': K_call, 'premium_received': 0, 'premium_paid': call_premium, 'total_premiums': total_premiums - call_premium,
                     'Inflow/Outflow': -call_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - call_premium
                 })
                 total_premiums -= call_premium
-                action_ledger.append({
+                add_action_entry({
                     'date': date, 'price': price, 'transaction': 'Buy Protective Put', 'lots': lot_qty,
                     'option_price': put_price, 'Strike Price': K_put, 'premium_received': 0, 'premium_paid': put_premium, 'total_premiums': total_premiums - put_premium,
                     'Inflow/Outflow': -put_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums - put_premium
@@ -146,14 +172,17 @@ class CoveredCallBacktester:
             # Write 0DTE call if holding shares
             if shares > 0:
                 T0 = 1 / 252
-                K0 = price * np.exp(self.volatility * np.sqrt(T0) * np.sign(delta_0dte - 0.5))
+                K0 = call_strike_quantile(delta_0dte)
+                if cost_basis_per_share is not None and K0 < cost_basis_per_share:
+                    K0 = cost_basis_per_share
+                K0 = round_up_50(K0)
                 c_price = price_option_crank_michelson(price, K0, T0, self.risk_free_rate,
                                                       self.dividend_yield, self.volatility, 'call')
                 lot_qty = shares // 100
                 callwrite_premium = c_price * 100 * lot_qty
                 cash += callwrite_premium
                 total_premiums += callwrite_premium
-                action_ledger.append({
+                add_action_entry({
                     'date': date, 'price': price, 'transaction': 'Call Writing', 'lots': lot_qty,
                     'option_price': c_price, 'Strike Price': K0, 'premium_received': callwrite_premium, 'premium_paid': 0, 'total_premiums': total_premiums,
                     'Inflow/Outflow': callwrite_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
@@ -163,7 +192,7 @@ class CoveredCallBacktester:
                     proceeds = shares * K0  # Assignment at strike price
                     cash += proceeds
                     pl_assignment = proceeds - (shares * cost_basis_per_share if cost_basis_per_share is not None else 0)
-                    action_ledger.append({
+                    add_action_entry({
                         'date': date, 'price': K0, 'transaction': 'Assignment', 'lots': lot_qty,
                         'option_price': K0, 'Strike Price': K0, 'premium_received': 0, 'premium_paid': 0, 'total_premiums': total_premiums,
                         'Inflow/Outflow': proceeds, 'P/L': pl_assignment, 'cash': cash, 'shares': 0, 'total_value': cash + total_premiums
@@ -211,7 +240,11 @@ def main(verbose=False):
     # Export top 5 action ledgers to XLSX
     for i, row in enumerate(top5.itertuples(), 1):
         df_action = row.action_ledger.copy()
-        df_action = df_action.sort_values('date')
+        # Sort by event_index if present, otherwise by date
+        if 'event_index' in df_action.columns:
+            df_action = df_action.sort_values(['date', 'event_index'])
+        else:
+            df_action = df_action.sort_values('date')
         full_dates = pd.date_range(backtester.start_date, backtester.end_date, freq='B')
         spy_prices = backtester.data.reindex(full_dates).copy().reset_index()
         spy_prices.columns = ['date', 'open', 'high', 'low', 'close', 'adj_close']
@@ -220,7 +253,8 @@ def main(verbose=False):
         merged = merged.merge(df_action, on='date', how='left')
         if 'open' not in merged.columns:
             merged['open'] = np.nan
-        base_cols = ['date', 'open', 'high', 'low', 'close']
+        merged = merged.sort_values(['date', 'event_index'] if 'event_index' in merged.columns else ['date'])
+        base_cols = ['event_index', 'date', 'open', 'high', 'low', 'close']
         extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'Inflow/Outflow', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
         other_cols = [c for c in merged.columns if c not in base_cols + extra_cols]
         cols = base_cols + extra_cols + other_cols
