@@ -65,11 +65,11 @@ class CoveredCallBacktester:
         logging.info(f"Retrieved {len(df_ohlc)} trading days with OHLC data")
         return df_ohlc
 
-    def run(self, delta_prot_call, delta_prot_put, prot_expiration_days, delta_0dte):
+    def run(self, delta_prot_call, delta_prot_put, prot_expiration_days, delta_0dte, asd=0.0):
         if self.verbose:
             logging.info(
                 f"Starting run: prot_call={delta_prot_call:.2f}, prot_put={delta_prot_put:.2f}, "
-                f"prot_days={prot_expiration_days}, delta_0dte={delta_0dte:.2f}"
+                f"prot_days={prot_expiration_days}, delta_0dte={delta_0dte:.2f}, asd={asd:.2f}"
             )
 
         cash = self.initial_capital
@@ -82,6 +82,8 @@ class CoveredCallBacktester:
         cost_basis_per_share = None
         lookback = 30  # Number of days for quantile calculation
         event_second = 0  # Used to increment event index for same-day events
+        assignment_count = 0
+        call_write_count = 0
         def add_action_entry(entry):
             nonlocal event_second
             entry['event_index'] = event_second
@@ -171,6 +173,7 @@ class CoveredCallBacktester:
 
             # Write 0DTE call if holding shares
             if shares > 0:
+                call_write_count += 1
                 T0 = 1 / 252
                 K0 = call_strike_quantile(delta_0dte)
                 if cost_basis_per_share is not None and K0 < cost_basis_per_share:
@@ -188,7 +191,8 @@ class CoveredCallBacktester:
                     'Inflow/Outflow': callwrite_premium, 'P/L': 0, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
                 })
                 # Assignment check
-                if high_price > K0:  # Assignment only if high exceeds strike
+                if high_price > K0 + asd:  # Assignment only if high exceeds strike + asd
+                    assignment_count += 1
                     proceeds = shares * K0  # Assignment at strike price
                     cash += proceeds
                     pl_assignment = proceeds - (shares * cost_basis_per_share if cost_basis_per_share is not None else 0)
@@ -204,16 +208,19 @@ class CoveredCallBacktester:
             ledger.append({'date': date, 'cash': cash, 'shares': shares,
                            'total_premiums': total_premiums, 'total_value': total_value})
 
-        return pd.DataFrame(ledger), pd.DataFrame(action_ledger)
+        assignment_rate = assignment_count / call_write_count if call_write_count > 0 else 0
+        return pd.DataFrame(ledger), pd.DataFrame(action_ledger), assignment_rate
 
 def main(verbose=False):
     setup_logging(logging.INFO if verbose else logging.WARNING)
     stock = 'SPY'  # You can change this to any stock symbol
     deltas = np.arange(0.1, 1.01, 0.2)  # Step size 0.2 instead of 0.1
     prot_days = np.arange(30, 181, 60)   # Step size 60 instead of 30
+    asd = 0.7  # Set your desired assignment sensitivity delta here
     print(f"\nStarting Covered Call Simulation for stock: {stock}")
     print(f"Delta range: {deltas}")
     print(f"Protective expiration days: {prot_days}")
+    print(f"Assignment sensitivity delta (asd): {asd}")
     print(f"Date range: 2020-05-01 to 2025-05-01\n")
     backtester = CoveredCallBacktester('2020-05-01', '2025-05-01', verbose=verbose, stock=stock)
     param_grid = list(product(deltas, deltas, prot_days, deltas))
@@ -221,22 +228,39 @@ def main(verbose=False):
     action_ledgers = []
     logging.info(f"Running {len(param_grid)} simulations...")
     for idx, (d_pc, d_pp, pdays, d0) in enumerate(tqdm(param_grid), start=1):
-        df_ledger, df_action_ledger = backtester.run(d_pc, d_pp, pdays, d0)
+        df_ledger, df_action_ledger, assignment_rate = backtester.run(d_pc, d_pp, pdays, d0, asd=asd)
+        # --- BUY & HOLD BENCHMARK ---
+        # Buy as many shares as possible at first open, hold to end
+        bh_open = backtester.data.iloc[0]['open']
+        bh_shares = int(backtester.initial_capital // bh_open)
+        bh_cash = backtester.initial_capital - (bh_shares * bh_open)
+        bh_values = []
+        for date, row in backtester.data.iterrows():
+            bh_value = bh_shares * row['close'] + bh_cash
+            bh_values.append({'date': date, 'buy_and_hold_value': bh_value})
+        df_bh = pd.DataFrame(bh_values)
+        # Merge buy & hold value into ledger for Excel export
+        df_action_ledger = df_action_ledger.copy()
+        df_action_ledger = pd.merge(df_action_ledger, df_bh, on='date', how='left')
+        # Also merge for full ledger if needed
+        df_ledger = pd.merge(df_ledger, df_bh, on='date', how='left')
         results.append({
             'delta_prot_call': d_pc,
             'delta_prot_put': d_pp,
             'prot_expiration_days': pdays,
             'delta_0dte': d0,
             'final_value': df_ledger['total_value'].iloc[-1],
+            'buy_and_hold_final': df_ledger['buy_and_hold_value'].iloc[-1],
             'volatility': df_ledger['total_value'].pct_change().std(),
+            'assignment_rate': assignment_rate,
             'action_ledger': df_action_ledger
         })
         if idx % 100 == 0:
             logging.info(f"{idx}/{len(param_grid)} completed")
     df_results = pd.DataFrame(results)
     top5 = df_results.sort_values(['final_value', 'volatility'], ascending=[False, True]).head(5)
-    print(f"\nTop 5 Results for stock: {stock}")
-    print(top5[[col for col in top5.columns if col != 'action_ledger']])
+    print(f"\nTop 5 Results for stock: {stock} (asd={asd})")
+    print(top5[[col for col in top5.columns if col not in ['action_ledger']]])
     # Export top 5 action ledgers to XLSX
     for i, row in enumerate(top5.itertuples(), 1):
         df_action = row.action_ledger.copy()
@@ -251,17 +275,22 @@ def main(verbose=False):
         merged = pd.DataFrame({'date': full_dates})
         merged = merged.merge(spy_prices[['date', 'open', 'high', 'low', 'close']], on='date', how='left')
         merged = merged.merge(df_action, on='date', how='left')
+        # Add buy & hold value for all dates
+        bh_open = backtester.data.iloc[0]['open']
+        bh_shares = int(backtester.initial_capital // bh_open)
+        bh_cash = backtester.initial_capital - (bh_shares * bh_open)
+        merged['BUY_&_HOLD'] = bh_shares * merged['close'] + bh_cash
         if 'open' not in merged.columns:
             merged['open'] = np.nan
         merged = merged.sort_values(['date', 'event_index'] if 'event_index' in merged.columns else ['date'])
         base_cols = ['event_index', 'date', 'open', 'high', 'low', 'close']
-        extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'Inflow/Outflow', 'P/L', 'cash', 'shares', 'total_value'] if c in merged.columns]
+        extra_cols = [c for c in ['transaction', 'lots', 'option_price', 'Strike Price', 'premium_received', 'premium_paid', 'total_premiums', 'Inflow/Outflow', 'P/L', 'cash', 'shares', 'total_value', 'buy_and_hold_value', 'BUY_&_HOLD'] if c in merged.columns]
         other_cols = [c for c in merged.columns if c not in base_cols + extra_cols]
         cols = base_cols + extra_cols + other_cols
         merged = merged[cols]
-        fname = f"{stock}_simulation_{i}_final_{row.final_value:.2f}.xlsx"
+        fname = f"{stock}_asd{asd}_simulation_{i}_final_{row.final_value:.2f}.xlsx"
         merged.to_excel(fname, index=False)
-        print(f"Exported {fname} for stock: {stock}")
+        print(f"Exported {fname} for stock: {stock} (asd={asd})")
 
 # Minimal test case
 def test_run():
@@ -275,7 +304,7 @@ def test_run():
     }, index=dates)
     tester = CoveredCallBacktester('2021-01-01', '2021-01-05', verbose=False)
     tester.data = df_test
-    ledger, action_ledger = tester.run(0.5, 0.5, 30, 0.5)
+    ledger, action_ledger, _ = tester.run(0.5, 0.5, 30, 0.5)
     assert len(ledger) == 5
     print("test_run OK")
 
