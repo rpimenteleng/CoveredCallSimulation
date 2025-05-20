@@ -116,6 +116,29 @@ class CoveredCallBacktester:
 
             # Roll protective positions at expiration
             if prot_expires and date >= prot_expires:
+                # Realize value for ITM protective options
+                itm_call_value = 0
+                itm_put_value = 0
+                if prot_positions['call'] is not None:
+                    call_strike = prot_positions['call']['strike']
+                    if price > call_strike:
+                        itm_call_value = (price - call_strike) * shares
+                        cash += itm_call_value
+                        add_action_entry({
+                            'date': date, 'price': price, 'transaction': 'Protective Call ITM Expiry', 'lots': lot_qty,
+                            'option_price': call_strike, 'Strike Price': call_strike, 'premium_received': itm_call_value, 'premium_paid': 0, 'total_premiums': total_premiums,
+                            'Inflow/Outflow': itm_call_value, 'P/L': itm_call_value, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
+                        })
+                if prot_positions['put'] is not None:
+                    put_strike = prot_positions['put']['strike']
+                    if price < put_strike:
+                        itm_put_value = (put_strike - price) * shares
+                        cash += itm_put_value
+                        add_action_entry({
+                            'date': date, 'price': price, 'transaction': 'Protective Put ITM Expiry', 'lots': lot_qty,
+                            'option_price': put_strike, 'Strike Price': put_strike, 'premium_received': itm_put_value, 'premium_paid': 0, 'total_premiums': total_premiums,
+                            'Inflow/Outflow': itm_put_value, 'P/L': itm_put_value, 'cash': cash, 'shares': shares, 'total_value': cash + shares * price + total_premiums
+                        })
                 prot_expires = None
                 prot_positions = {'call': None, 'put': None}
                 add_action_entry({
@@ -144,6 +167,11 @@ class CoveredCallBacktester:
                 T = prot_expiration_days / 252
                 K_call = call_strike_quantile(delta_prot_call)
                 K_put = put_strike_quantile(delta_prot_put)
+                # Ensure protective call is OTM (strike > price) and put is OTM (strike < price)
+                if K_call <= price:
+                    K_call = round_up_50(price + 0.5)
+                if K_put >= price:
+                    K_put = round_up_50(price - 0.5)
                 call_price = price_option_crank_michelson(price, K_call, T, self.risk_free_rate,
                                                        self.dividend_yield, self.volatility, 'call')
                 put_price = price_option_crank_michelson(price, K_put, T, self.risk_free_rate,
