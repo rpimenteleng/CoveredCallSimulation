@@ -241,7 +241,7 @@ class CoveredCallBacktester:
 
 def main(verbose=False):
     setup_logging(logging.INFO if verbose else logging.WARNING)
-    stock = 'SPY'  # You can change this to any stock symbol
+    stock = 'IWM'  # You can change this to any stock symbol
     deltas = np.arange(0.1, 1.01, 0.2)  # Step size 0.2 instead of 0.1
     prot_days = np.arange(30, 181, 60)   # Step size 60 instead of 30
     asd = 0.7  # Set your desired assignment sensitivity delta here
